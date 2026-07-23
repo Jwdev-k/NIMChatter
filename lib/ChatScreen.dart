@@ -1,9 +1,11 @@
 import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:http/http.dart' as http;
+import 'package:isar/isar.dart';
 import 'package:nim_chatter/model/ChatMessage.dart';
+import 'package:nim_chatter/model/ChatSession.dart';
+import 'package:nim_chatter/services/IsarService.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -21,7 +23,12 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<ChatMessage> _messages = [];
   bool _isLoading = false;
 
-  // NVIDIA Build 대표 추천 모델 목록
+  // Isar 관련 상태
+  final IsarService _isarService = IsarService();
+  List<ChatSession> _sessions = [];
+  ChatSession? _currentSession; // 현재 활성화된 세션 (null이면 새 대화)
+
+  // NVIDIA 모델 설정
   final List<String> _presetModels = [
     'nvidia/nemotron-3-super-120b-a12b',
     'nvidia/nemotron-3-ultra-550b-a55b',
@@ -39,17 +46,98 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _selectedModel = _presetModels.first;
+    _initIsarAndLoadHistory();
   }
 
-  // 현재 사용할 실제 모델 ID 반환
-  String get _currentModelId {
-    if (_isCustomModel) {
-      return _customModelController.text.trim();
+  // Isar 초기화 및 대화 목록 로드
+  Future<void> _initIsarAndLoadHistory() async {
+    await _isarService.init();
+    await _refreshSessions();
+  }
+
+  Future<void> _refreshSessions() async {
+    final list = await _isarService.getAllSessions();
+    setState(() {
+      _sessions = list;
+    });
+  }
+
+  // 새 대화방 시작
+  void _startNewChat() {
+    setState(() {
+      _httpClient?.close();
+      _currentSession = null;
+      _messages.clear();
+    });
+    Navigator.pop(context); // Drawer 닫기
+  }
+
+  // 특정 히스토리 선택 시 대화 이어가기
+  void _loadSession(ChatSession session) {
+    setState(() {
+      _httpClient?.close();
+      _currentSession = session;
+      _messages.clear();
+      for (var m in session.messages) {
+        _messages.add(ChatMessage(
+          role: m.role ?? 'user',
+          content: m.content ?? '',
+          reasoning: m.reasoning ?? '',
+        ));
+      }
+    });
+    Navigator.pop(context); // Drawer 닫기
+    _scrollToBottom();
+  }
+
+  // 세션 삭제
+  Future<void> _deleteSession(Id id) async {
+    await _isarService.deleteSession(id);
+    if (_currentSession?.id == id) {
+      _startNewChat();
     }
-    return _selectedModel;
+    await _refreshSessions();
   }
 
-  // 설정 다이얼로그 노출 메서드
+  // DB에 현재 대화 저장/업데이트
+  Future<void> _saveCurrentStateToIsar() async {
+    if (_messages.isEmpty) return;
+
+    final now = DateTime.now();
+    final firstUserMsg = _messages.firstWhere(
+          (m) => m.role == 'user',
+      orElse: () => ChatMessage(role: 'user', content: 'New Chat'),
+    );
+
+    // 제목은 첫 메시지의 최대 20자
+    final title = firstUserMsg.content.length > 20
+        ? '${firstUserMsg.content.substring(0, 20)}...'
+        : firstUserMsg.content;
+
+    ChatSession sessionToSave = _currentSession ?? ChatSession()
+      ..createdAt = now;
+
+    sessionToSave.title = title.isEmpty ? 'New Chat' : title;
+    sessionToSave.updatedAt = now;
+    sessionToSave.messages = _messages.map((m) {
+      return ChatMessageItem()
+        ..role = m.role
+        ..content = m.content
+        ..reasoning = m.reasoning;
+    }).toList();
+
+    final savedId = await _isarService.saveSession(sessionToSave);
+    sessionToSave.id = savedId;
+    _currentSession = sessionToSave;
+
+    await _refreshSessions();
+  }
+
+  String get _currentModelId {
+    return _isCustomModel ? _customModelController.text.trim() : _selectedModel;
+  }
+
+  // API 및 모델 설정 다이얼로그 (배경 반투명, 최소 너비 500, ... 처리)
   void _showSettingsDialog() {
     showDialog(
       context: context,
@@ -57,23 +145,17 @@ class _ChatScreenState extends State<ChatScreen> {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              // 1. 다이얼로그 배경 반투명 처리 및 스타일 설정
               backgroundColor: Colors.black.withValues(alpha: 0.85),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(16),
-                side: BorderSide(color: Colors.grey[800]!),
               ),
               title: const Row(
                 children: [
                   Icon(Icons.settings, color: Color(0xFF76B900)),
                   SizedBox(width: 8),
-                  Text(
-                    'API 및 모델 설정',
-                    style: TextStyle(color: Colors.white),
-                  ),
+                  Text('API 및 모델 설정', style: TextStyle(color: Colors.white)),
                 ],
               ),
-              // 2. 최소 너비를 500으로 고정하기 위해 SizedBox로 감싸기
               content: SizedBox(
                 width: 500,
                 child: SingleChildScrollView(
@@ -86,18 +168,17 @@ class _ChatScreenState extends State<ChatScreen> {
                         style: const TextStyle(color: Colors.white),
                         decoration: const InputDecoration(
                           labelText: 'NVIDIA API Key (nvapi-...)',
-                          hintText: 'build.nvidia.com에서 발급받은 API 키 입력',
+                          hintText: 'build.nvidia.com 발급 키',
                           prefixIcon: Icon(Icons.key),
                           border: OutlineInputBorder(),
                           isDense: true,
                         ),
                       ),
                       const SizedBox(height: 16),
-                      // 3. 드롭다운 텍스트 길어질 때 ... 수용
                       DropdownButtonFormField<String>(
                         initialValue: _selectedModel,
-                        isExpanded: true, // 너비 전체 채우기
-                        dropdownColor: Colors.grey[900], // 드롭다운 메뉴 배경색
+                        isExpanded: true,
+                        dropdownColor: Colors.grey[900],
                         style: const TextStyle(color: Colors.white),
                         decoration: const InputDecoration(
                           labelText: '모델 선택',
@@ -109,7 +190,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             value: model,
                             child: Text(
                               model,
-                              overflow: TextOverflow.ellipsis, // 텍스트 넘어갈 시 ... 처리
+                              overflow: TextOverflow.ellipsis,
                               maxLines: 1,
                               softWrap: false,
                               style: const TextStyle(color: Colors.white),
@@ -167,32 +248,24 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // NVIDIA Build API 호출 (OpenAI 호환 포맷)
+  // 메시지 전송 및 Isar 저장
+
+  http.Client? _httpClient;
+
   Future<void> _sendMessage() async {
     String apiKey = _apiKeyController.text.trim();
     final userText = _messageController.text.trim();
     final modelId = _currentModelId;
 
     if (apiKey.isEmpty) {
-      _showSnackBar('NVIDIA API Key를 먼저 설정해 주세요 (우측 상단 ⚙️ 아이콘).');
+      _showSnackBar('NVIDIA API Key를 먼저 설정해 주세요.');
       _showSettingsDialog();
       return;
     }
 
-    // nvapi- 중복 부착 방지
-    if (!apiKey.startsWith('nvapi-')) {
-      apiKey = 'nvapi-$apiKey';
-    }
-
+    if (!apiKey.startsWith('nvapi-')) apiKey = 'nvapi-$apiKey';
     if (userText.isEmpty) return;
 
-    if (modelId.isEmpty) {
-      _showSnackBar('사용할 모델 ID를 입력해 주세요.');
-      _showSettingsDialog();
-      return;
-    }
-
-    // 1. 사용자 메시지 및 AI 메시지 공간 생성
     setState(() {
       _messages.add(ChatMessage(role: 'user', content: userText));
       _messages.add(ChatMessage(role: 'assistant', reasoning: '', content: ''));
@@ -205,7 +278,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final assistantIndex = _messages.length - 1;
 
     try {
-      final client = http.Client();
+      _httpClient = http.Client();
       final request = http.Request(
         'POST',
         Uri.parse('https://integrate.api.nvidia.com/v1/chat/completions'),
@@ -217,7 +290,6 @@ class _ChatScreenState extends State<ChatScreen> {
         'Accept': 'text/event-stream',
       });
 
-      // 2. 파이썬 OpenAI SDK의 extra_body 구조를 정확히 JSON 파라미터로 매핑
       request.body = jsonEncode({
         'model': modelId,
         'messages': _messages
@@ -228,15 +300,13 @@ class _ChatScreenState extends State<ChatScreen> {
         'top_p': 0.95,
         'max_tokens': 16384,
         'stream': true,
-        // extra_body 필드 반영
         'chat_template_kwargs': {'enable_thinking': true},
         'reasoning_budget': 16384,
       });
 
-      final response = await client.send(request);
+      final response = await _httpClient!.send(request);
 
       if (response.statusCode == 200) {
-        // 3. SSE 스트리밍 수신 (LineSplitter 사용)
         await response.stream
             .transform(utf8.decoder)
             .transform(const LineSplitter())
@@ -251,54 +321,58 @@ class _ChatScreenState extends State<ChatScreen> {
               if (choices != null && choices.isNotEmpty) {
                 final delta = choices[0]['delta'];
 
-                // (1) reasoning_content (생각 과정) 파싱 및 축적
                 final reasoningChunk = delta['reasoning_content'];
-                if (reasoningChunk != null && reasoningChunk.toString().isNotEmpty) {
+                if (reasoningChunk != null && reasoningChunk
+                    .toString()
+                    .isNotEmpty) {
                   setState(() {
-                    _messages[assistantIndex].reasoning += reasoningChunk.toString();
+                    _messages[assistantIndex].reasoning +=
+                        reasoningChunk.toString();
                   });
                 }
 
-                // (2) content (최종 답변) 파싱 및 축적
                 final contentChunk = delta['content'];
-                if (contentChunk != null && contentChunk.toString().isNotEmpty) {
+                if (contentChunk != null && contentChunk
+                    .toString()
+                    .isNotEmpty) {
                   setState(() {
-                    _messages[assistantIndex].content += contentChunk.toString();
+                    _messages[assistantIndex].content +=
+                        contentChunk.toString();
                   });
                 }
 
                 _scrollToBottom();
               }
-            } catch (_) {
-              // 스트리밍 조각 JSON 파싱 예외 무시
-            }
+            } catch (_) {}
           }
         });
       } else {
         final errorBody = await response.stream.bytesToString();
-        try {
-          final errorJson = jsonDecode(errorBody);
-          final errorMsg = errorJson['detail'] ?? errorJson['message'] ?? errorBody;
-          _showSnackBar('API 오류 (${response.statusCode}): $errorMsg');
-        } catch (_) {
-          _showSnackBar('API 오류 (${response.statusCode}): $errorBody');
-        }
-        setState(() {
-          _messages.removeAt(assistantIndex);
-        });
+        _showSnackBar('API 오류 (${response.statusCode}): $errorBody');
+        setState(() => _messages.removeAt(assistantIndex));
       }
     } catch (e) {
-      _showSnackBar('네트워크 오류가 발생했습니다: $e');
-      if (_messages.isNotEmpty && _messages.last.content.isEmpty && _messages.last.reasoning.isEmpty) {
-        setState(() {
-          _messages.removeLast();
-        });
+      _showSnackBar('네트워크 오류: $e');
+      if (_messages.isNotEmpty && _messages.last.content.isEmpty) {
+        setState(() => _messages.removeLast());
       }
     } finally {
+      setState(() => _isLoading = false);
+      _scrollToBottom();
+      // 메시지 응답 완료 후 Isar DB에 대화 저장
+      await _saveCurrentStateToIsar();
+    }
+  }
+
+  void _cancelStreaming() {
+    if (_isLoading) {
+      _httpClient?.close(); // HTTP 커넥션을 강제로 닫아 스트림 수신 중단
+      _httpClient = null;
       setState(() {
         _isLoading = false;
       });
-      _scrollToBottom();
+
+      _showSnackBar('응답 생성이 취소되었습니다.');
     }
   }
 
@@ -320,7 +394,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // 메시지 카드 빌더 메서드 (마크다운 지원)
   Widget _buildMessageItem(ChatMessage msg) {
     final isUser = msg.role == 'user';
     final theme = Theme.of(context);
@@ -343,14 +416,9 @@ class _ChatScreenState extends State<ChatScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 1. Thinking (생각 과정) 블록
             if (!isUser && msg.reasoning.isNotEmpty) ...[
               InkWell(
-                onTap: () {
-                  setState(() {
-                    msg.isExpanded = !msg.isExpanded;
-                  });
-                },
+                onTap: () => setState(() => msg.isExpanded = !msg.isExpanded),
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10.0, vertical: 6.0),
                   decoration: BoxDecoration(
@@ -395,47 +463,25 @@ class _ChatScreenState extends State<ChatScreen> {
                     selectable: true,
                     styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
                       p: TextStyle(fontSize: 13, color: Colors.grey[400], fontFamily: 'monospace'),
-                      code: TextStyle(backgroundColor: Colors.grey[800], fontSize: 12),
                     ),
                   ),
                 ),
               ],
               const SizedBox(height: 10),
             ],
-
-            // 2. 최종 답변 (Content) 영역
             if (msg.content.isNotEmpty)
               MarkdownBody(
                 data: msg.content,
                 selectable: true,
                 styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
                   p: const TextStyle(fontSize: 15, height: 1.5, color: Colors.white),
-                  h1: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
-                  h2: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
-                  h3: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
-                  code: TextStyle(
-                    backgroundColor: Colors.grey[800],
-                    color: Colors.lightGreenAccent,
-                    fontSize: 13,
-                  ),
-                  codeblockDecoration: BoxDecoration(
-                    color: Colors.black45,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.grey[700]!),
-                  ),
-                  tableBorder: TableBorder.all(color: Colors.grey[600]!, width: 1),
-                  tableCellsPadding: const EdgeInsets.all(8.0),
                 ),
               )
             else if (!isUser && msg.reasoning.isEmpty)
               const Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
+                  SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
                   SizedBox(width: 8),
                   Text('Thinking...', style: TextStyle(color: Colors.grey)),
                 ],
@@ -450,46 +496,101 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Row(
-          children: [
-            Icon(Icons.developer_board, color: Color(0xFF76B900)),
-            SizedBox(width: 8),
-            Text('NVIDIA Build LLM Chat'),
-          ],
-        ),
+        title: Text(_currentSession?.title ?? 'New Chat'),
         actions: [
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: 'API 및 모델 설정',
             onPressed: _showSettingsDialog,
           ),
-          IconButton(
-            icon: const Icon(Icons.delete_outline),
-            tooltip: '대화 초기화',
-            onPressed: () {
-              setState(() => _messages.clear());
-            },
-          ),
         ],
       ),
+
+      // 좌측 대화 히스토리 사이드 메뉴 (Drawer)
+      drawer: Drawer(
+        backgroundColor: Colors.grey[900],
+        child: Column(
+          children: [
+            DrawerHeader(
+              decoration: const BoxDecoration(color: Colors.black),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.developer_board, color: Color(0xFF76B900)),
+                      SizedBox(width: 8),
+                      Text(
+                        'NVIDIA Chat',
+                        style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF76B900),
+                      foregroundColor: Colors.white,
+                      minimumSize: const Size.fromHeight(40),
+                    ),
+                    onPressed: _startNewChat,
+                    icon: const Icon(Icons.add),
+                    label: const Text('새 대화 시작'),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: _sessions.isEmpty
+                  ? const Center(
+                child: Text('저장된 히스토리가 없습니다.', style: TextStyle(color: Colors.grey)),
+              )
+                  : ListView.builder(
+                itemCount: _sessions.length,
+                itemBuilder: (context, index) {
+                  final session = _sessions[index];
+                  final isSelected = _currentSession?.id == session.id;
+
+                  return ListTile(
+                    selected: isSelected,
+                    selectedTileColor: const Color(0xFF76B900).withValues(alpha: 0.2),
+                    leading: const Icon(Icons.chat_bubble_outline, color: Colors.grey),
+                    title: Text(
+                      session.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: isSelected ? const Color(0xFF76B900) : Colors.white,
+                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                      ),
+                    ),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline, size: 18, color: Colors.grey),
+                      onPressed: () => _deleteSession(session.id),
+                    ),
+                    onTap: () => _loadSession(session),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+
       body: Center(
         child: Container(
           constraints: const BoxConstraints(maxWidth: 900),
           padding: const EdgeInsets.all(16.0),
           child: Column(
             children: [
-              // 1. 대화 목록 영역
               Expanded(
                 child: _messages.isEmpty
                     ? Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Icon(
-                        Icons.chat_bubble_outline,
-                        size: 48,
-                        color: Colors.grey,
-                      ),
+                      const Icon(Icons.chat_bubble_outline, size: 48, color: Colors.grey),
                       const SizedBox(height: 12),
                       const Text(
                         '우측 상단 설정(⚙️) 아이콘을 눌러\nNVIDIA API 키를 설정 후 대화를 시작하세요!',
@@ -508,32 +609,34 @@ class _ChatScreenState extends State<ChatScreen> {
                     : ListView.builder(
                   controller: _scrollController,
                   itemCount: _messages.length,
-                  itemBuilder: (context, index) {
-                    return _buildMessageItem(_messages[index]);
-                  },
+                  itemBuilder: (context, index) => _buildMessageItem(_messages[index]),
                 ),
               ),
-
               if (_isLoading)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 8.0),
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8.0),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                      const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                      const SizedBox(width: 10),
+                      const Text('NVIDIA API 응답 스트리밍 중...'),
+                      const SizedBox(width: 12),
+                      TextButton.icon(
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.redAccent,
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        onPressed: _cancelStreaming,
+                        icon: const Icon(Icons.stop_circle_outlined, size: 16),
+                        label: const Text('취소', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
                       ),
-                      SizedBox(width: 10),
-                      Text('NVIDIA API 응답 스트리밍 중...'),
                     ],
                   ),
                 ),
-
               const SizedBox(height: 8),
-
-              // 2. 메시지 입력 영역
               Row(
                 children: [
                   Expanded(
@@ -550,9 +653,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   const SizedBox(width: 8),
                   IconButton.filled(
                     icon: const Icon(Icons.send),
-                    style: IconButton.styleFrom(
-                      backgroundColor: const Color(0xFF76B900),
-                    ),
+                    style: IconButton.styleFrom(backgroundColor: const Color(0xFF76B900)),
                     onPressed: _isLoading ? null : _sendMessage,
                   ),
                 ],
