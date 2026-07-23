@@ -1,6 +1,6 @@
-# nim_chatter
-
-NVIDIA BUILD OPEN AI
+# NIMChatter
+ 
+#### LLM Model Chatting Clinet
 
 ## Getting Started
 
