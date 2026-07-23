@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:nim_chatter/ChatScreen.dart';
+import 'package:nim_chatter/view/ChatScreen.dart';
 
 void main() {
   runApp(const NvidiaChatApp());
