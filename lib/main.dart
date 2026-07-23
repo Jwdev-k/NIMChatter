@@ -11,7 +11,7 @@ class NvidiaChatApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'NVIDIA Build Web Chat',
+      title: 'NVIDIA Build AI Chat',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(

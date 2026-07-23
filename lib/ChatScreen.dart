@@ -352,7 +352,7 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() => _messages.removeAt(assistantIndex));
       }
     } catch (e) {
-      _showSnackBar('네트워크 오류: $e');
+      debugPrint('네트워크 오류: $e');
       if (_messages.isNotEmpty && _messages.last.content.isEmpty) {
         setState(() => _messages.removeLast());
       }
