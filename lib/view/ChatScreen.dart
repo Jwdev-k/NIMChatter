@@ -24,6 +24,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   final List<ChatMessage> _messages = [];
   bool _isLoading = false;
+  bool _enableThinking = true;
 
   // Isar 관련 상태
   final IsarService _isarService = IsarService();
@@ -242,6 +243,29 @@ class _ChatScreenState extends State<ChatScreen> {
                           isDense: true,
                         ),
                       ),
+                      const SizedBox(height: 16),
+                      SwitchListTile(
+                        title: const Text(
+                          'Thinking Process 활성화',
+                          style: TextStyle(color: Colors.white, fontSize: 14),
+                        ),
+                        subtitle: const Text(
+                          'AI의 추론/생각 과정을 함께 출력합니다.',
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                        ),
+                        activeThumbColor: const Color(0xFF76B900), // NVIDIA Green
+                        value: _enableThinking,
+                        onChanged: (bool value) {
+                          // 다이얼로그 내부 UI 즉시 갱신
+                          setDialogState(() {
+                            _enableThinking = value;
+                          });
+                          // 메인 ChatScreen State 갱신
+                          setState(() {
+                            _enableThinking = value;
+                          });
+                        },
+                      )
                     ],
                   ),
                 ),
@@ -320,7 +344,7 @@ class _ChatScreenState extends State<ChatScreen> {
         'top_p': 0.95,
         'max_tokens': int.parse(maxTokens),
         'stream': true,
-        'chat_template_kwargs': {'enable_thinking': true},
+        'chat_template_kwargs': {'enable_thinking': _enableThinking},
         'reasoning_budget': int.parse(maxTokens),
       });
 
