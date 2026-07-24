@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:http/http.dart' as http;
 import 'package:isar/isar.dart';
@@ -18,6 +19,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _apiKeyController = TextEditingController();
   final TextEditingController _messageController = TextEditingController();
   final TextEditingController _customModelController = TextEditingController();
+  final TextEditingController _maxTokensController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
 
   final List<ChatMessage> _messages = [];
@@ -47,6 +49,7 @@ class _ChatScreenState extends State<ChatScreen> {
     super.initState();
     _selectedModel = _presetModels.first;
     _initIsarAndLoadHistory();
+    _maxTokensController.text = '16384';
   }
 
   // Isar 초기화 및 대화 목록 로드
@@ -223,6 +226,22 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                         ),
                       ],
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _maxTokensController,
+                        keyboardType: TextInputType.number, // 숫자 키패드 띄우기
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly, // 숫자만 입력 허용 (0-9)
+                        ],
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          labelText: 'Default MaxTokens 16384 ',
+                          hintText: '16384',
+                          prefixIcon: Icon(Icons.key),
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -256,6 +275,7 @@ class _ChatScreenState extends State<ChatScreen> {
     String apiKey = _apiKeyController.text.trim();
     final userText = _messageController.text.trim();
     final modelId = _currentModelId;
+    final maxTokens = _maxTokensController.text.trim();
 
     if (apiKey.isEmpty) {
       _showSnackBar('NVIDIA API Key를 먼저 설정해 주세요.');
@@ -298,10 +318,10 @@ class _ChatScreenState extends State<ChatScreen> {
             .toList(),
         'temperature': 1.0,
         'top_p': 0.95,
-        'max_tokens': 16384,
+        'max_tokens': int.parse(maxTokens),
         'stream': true,
         'chat_template_kwargs': {'enable_thinking': true},
-        'reasoning_budget': 16384,
+        'reasoning_budget': int.parse(maxTokens),
       });
 
       final response = await _httpClient!.send(request);
@@ -390,7 +410,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _showSnackBar(String text) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(text), backgroundColor: Colors.redAccent),
+      SnackBar(content: Text(text),
+          backgroundColor: Colors.redAccent,
+          duration: Duration(seconds: 1)
+      )
     );
   }
 
@@ -475,6 +498,14 @@ class _ChatScreenState extends State<ChatScreen> {
                 selectable: true,
                 styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
                   p: const TextStyle(fontSize: 15, height: 1.5, color: Colors.white),
+                  blockquoteDecoration: BoxDecoration(
+                    color: Colors.black, // 또는 Colors.grey[900] (어두운 회색)
+                    borderRadius: BorderRadius.circular(8),
+                    border: const Border(
+                      left: BorderSide(color: Color(0xFF76B900), width: 4), // 왼쪽 테두리에 포인트 컬러(NVIDIA Green) 부여
+                    ),
+                  ),
+                  blockquotePadding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
                 ),
               )
             else if (!isUser && msg.reasoning.isEmpty)
@@ -622,16 +653,19 @@ class _ChatScreenState extends State<ChatScreen> {
                       const SizedBox(width: 10),
                       const Text('NVIDIA API 응답 스트리밍 중...'),
                       const SizedBox(width: 12),
-                      TextButton.icon(
-                        style: TextButton.styleFrom(
-                          foregroundColor: Colors.redAccent,
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                          minimumSize: Size.zero,
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      MouseRegion(
+                        cursor: SystemMouseCursors.click,
+                        child: TextButton.icon(
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.redAccent,
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          onPressed: _cancelStreaming,
+                          icon: const Icon(Icons.stop_circle_outlined, size: 16),
+                          label: const Text('취소', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
                         ),
-                        onPressed: _cancelStreaming,
-                        icon: const Icon(Icons.stop_circle_outlined, size: 16),
-                        label: const Text('취소', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
                       ),
                     ],
                   ),
@@ -652,6 +686,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                   const SizedBox(width: 8),
                   IconButton.filled(
+                    mouseCursor: SystemMouseCursors.click,
                     icon: const Icon(Icons.send),
                     style: IconButton.styleFrom(backgroundColor: const Color(0xFF76B900)),
                     onPressed: _isLoading ? null : _sendMessage,
